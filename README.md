@@ -1,128 +1,152 @@
-# 🎾 Tennis Explorer — Sportradar Tennis Data Analytics
+# 🎾 Tennis Explorer — Game Analytics with Sportradar API
 
-A full data pipeline and interactive dashboard built on live Sportradar Tennis API data: competitions, venues/complexes, and ATP/WTA doubles rankings, stored in MySQL and explored through a Streamlit app.
+**An end-to-end tennis analytics project using Python, MySQL, SQL, and Streamlit.**
 
-> For a highly detailed, step-by-step build log (including raw data file names, cleaning logic, and troubleshooting notes), see **Tennis_Explorer_Project_Documentation.docx** in this repo.
+🔗 **Live Application:** https://tennis-explorer-zawxixnorsxujz6ttykgnm.streamlit.app/
 
-## Project Overview
+💻 **GitHub Repository:** https://github.com/rvmamgai/tennis-explorer
 
-This project extracts tennis competition, venue, and doubles-ranking data from the Sportradar Tennis API, transforms the nested JSON into a normalized relational schema, loads it into MySQL, and presents it through an interactive Streamlit dashboard with filters, search, pagination, and charts.
+## 📌 Project Overview
 
-## Tech Stack
+Tennis Explorer transforms tennis data from the Sportradar Tennis API into a structured relational database and an interactive analytics dashboard.
 
-- **Python** — data extraction and transformation
-- **Sportradar Tennis API** — data source
-- **MySQL** — relational database
-- **SQLAlchemy + PyMySQL** — database connectivity
-- **Streamlit** — interactive web dashboard
-- **Plotly** — bar and donut charts
-- **pandas** — data handling between SQL and the UI
+The project extracts nested JSON data, cleans and transforms it using Python, stores it in MySQL, and uses SQL queries to generate insights presented through interactive Streamlit charts, filters, and tables.
 
-## Project Structure
+## 🎯 Project Objectives
 
-```
-tennis_explorer/
-├── app.py                   # Streamlit dashboard
-├── database.py               # DB connection + load_table() upsert function
-├── transform.py               # Parses raw API JSON into flat rows
-├── load_data.py               # Runs the full extract -> transform -> load pipeline
-├── sql_queries.sql            # All 20 required analysis queries
-├── requirements.txt            # Python dependencies
-├── .env.example                 # Template for required environment variables
-├── .env                          # Real secrets (not uploaded — excluded via .gitignore)
+- Analyze tennis competitions, categories, and tournament hierarchies.
+- Explore sports complexes, venues, locations, and time zones.
+- Analyze ATP and WTA doubles competitor rankings.
+- Develop reusable SQL queries for filtering, aggregation, and ranking analysis.
+- Build an interactive dashboard for exploring tennis data.
+- Implement repeatable data loading and secure credential management.
+
+## 🛠️ Technology Stack
+
+- **Programming:** Python
+- **API:** Sportradar Tennis API
+- **Database:** MySQL
+- **Data Analysis:** Pandas, SQL
+- **Database Connectivity:** SQLAlchemy, PyMySQL
+- **Dashboard:** Streamlit
+- **Visualization:** Plotly
+- **Configuration:** python-dotenv and Streamlit Secrets
+
+## 📊 Dataset Summary
+
+The project processes **13,595 rows across six MySQL tables**.
+
+| Table | Records |
+|---|---:|
+| Categories | 18 |
+| Competitions | 6,681 |
+| Complexes | 778 |
+| Venues | 4,116 |
+| Competitors | 1,000 |
+| Competitor Rankings | 1,000 |
+| **Total** | **13,595** |
+
+## ✨ Key Features
+
+- Interactive ranking dashboard with KPIs and competitor search.
+- Top 10 doubles competitors by ranking points.
+- Competition distribution by gender and category.
+- Country-wise competitor counts and average ranking points.
+- Searchable, filterable venue and sports complex explorer.
+- Competition and parent–sub-competition exploration.
+- Paginated database results using SQL LIMIT and OFFSET.
+- Relational database design with primary and foreign keys.
+- Repeatable data loading designed to avoid duplicate records.
+- Secure configuration for local and cloud environments.
+
+## 📈 Key Analytical Insights
+
+- Compare leading doubles competitors by ranking points.
+- Explore the distribution of competitions by gender and category.
+- Compare competitor counts with average points across countries.
+- Investigate venue locations, associated complexes, and time zones.
+- Examine competition structures and categories.
+
+*Findings reflect the captured dataset and should not be interpreted as live rankings.*
+
+## 🗂️ Project Structure
+
+```text
+tennis-explorer/
+├── app.py
+├── database.py
+├── explore_complexes.py
+├── explore_rankings.py
+├── load_data.py
+├── transform.py
+├── sql_queries.sql
+├── requirements.txt
+├── README.md
 ├── .gitignore
 ├── .streamlit/
-│   └── config.toml                # App theme
-├── sample_response.json            # Cached raw API response: competitions
-├── sample_complexes.json           # Cached raw API response: complexes & venues
-├── sample_rankings.json            # Cached raw API response: doubles rankings
-└── Tennis_Explorer_Project_Documentation.docx   # Full detailed build log
+│   └── config.toml
+└── sample_*.json
 ```
 
-## Database Schema
+## ⚙️ Run Locally
 
-| Table | Description | Key relationships |
-|---|---|---|
-| `categories` | Tour/category names (ATP, WTA, ITF Men, etc.) | — |
-| `competitions` | All tennis competitions | `category_id` → categories, `parent_id` → self (sub-competitions) |
-| `complexes` | Sports complexes | — |
-| `venues` | Individual courts/venues | `complex_id` → complexes |
-| `competitors` | Doubles players | — |
-| `competitor_rankings` | Weekly ATP/WTA doubles rankings | `competitor_id` → competitors |
+### 1. Clone the repository
 
-**Note on schema additions:** `competitor_rankings` includes `ranking_name`, `gender`, `year`, and `week` columns beyond the assignment's base spec. These were added because the required analysis (e.g. identifying "the current week", distinguishing ATP from WTA) isn't possible without them — see the docx documentation for full reasoning.
+```bash
+git clone https://github.com/rvmamgai/tennis-explorer.git
+cd tennis-explorer
+```
 
-## Setup Instructions
+### 2. Create a virtual environment
 
-1. **Clone the repository**
-   ```
-   git clone <your-repo-url>
-   cd tennis_explorer
-   ```
+```bash
+python -m venv venv
+```
 
-2. **Install dependencies**
-   ```
-   pip install -r requirements.txt
-   ```
+Activate it on Windows:
 
-3. **Create the MySQL database and tables**
+```powershell
+.\venv\Scripts\Activate.ps1
+```
 
-   Create the database:
-   ```sql
-   CREATE DATABASE tennis_db;
-   ```
-   Then run the six `CREATE TABLE` statements in Section 8 of the docx documentation (or in MySQL Workbench) to set up `categories`, `competitions`, `complexes`, `venues`, `competitors`, and `competitor_rankings`.
+### 3. Install dependencies
 
-4. **Configure environment variables**
+```bash
+pip install -r requirements.txt
+```
 
-   Copy `.env.example` to `.env` and fill in your real values:
-   ```
-   DB_USER=root
-   DB_PASSWORD=your_actual_password
-   DB_HOST=localhost
-   DB_PORT=3306
-   DB_NAME=tennis_db
-   SPORTRADAR_API_KEY=your_actual_sportradar_key
-   ```
+### 4. Configure credentials
 
-   Get a free Sportradar trial key at [developer.sportradar.com](https://developer.sportradar.com) — after signing up, make sure to add the **Tennis** API to your application from the Marketplace (a new account has no active subscriptions by default).
+Configure your Sportradar API key and MySQL connection details in your local `.env` file, following the configuration expected by the project.
 
-5. **Load the data**
-   ```
-   python load_data.py
-   ```
-   This fetches competitions, complexes, and doubles rankings from the live API and loads them into MySQL. It's safe to re-run — existing rows are updated in place, not duplicated.
+For cloud deployment, configure the required credentials through Streamlit Secrets.
 
-6. **Run the app**
-   ```
-   streamlit run app.py
-   ```
+**Never commit API keys, database passwords, or your `.env` file to GitHub.**
 
-## Features
+### 5. Launch the dashboard
 
-- **KPI dashboard** — total competitors, countries represented, highest points
-- **Top 10 by points** (horizontal bar) and **competitions by gender** (donut chart), both filter-aware
-- **Rankings** — sidebar filters for gender, rank range, country, and name search, with a paginated results table
-- **Leaderboards** — top-ranked and highest-points tabs
-- **Country-wise analysis** — competitor counts and average points per country
-- **Competitions search** — filter by category, type, and name
-- **Parent/sub-competition explorer** — view tournament hierarchies via a self-join query
-- **Venues and complexes** — browse by country
-- **Pagination** — all large result sets are paginated at the database level (`LIMIT`/`OFFSET`), so the app never loads an entire table into memory at once
+Ensure the configured database is accessible, then run:
 
-## SQL Queries
+```bash
+streamlit run app.py
+```
 
-All 20 required analysis queries (competitions, venues/complexes, and doubles rankings) are documented with comments in [`sql_queries.sql`](./sql_queries.sql).
+## 🔐 Security and Data Integrity
 
-## Challenges Faced
+- Keep sensitive credentials outside source control.
+- Use environment variables locally and Streamlit Secrets in deployment.
+- Validate API responses and database row counts.
+- Use relational keys to maintain connections between datasets.
+- Verify repeatability when loading data again.
 
-- **ISP-level DNS blocking:** `api.sportradar.com` was blocked at the network/DNS level on the development machine's home ISP. Resolved by switching to public DNS (1.1.1.1 / 1.0.0.1) at the OS network level.
-- **API trial activation:** A fresh Sportradar account does not automatically grant access to any sport's API — the Tennis API had to be explicitly added via the Marketplace before requests would succeed.
-- **MySQL reserved word:** `rank` is reserved in MySQL and had to be wrapped in backticks (`` `rank` ``) everywhere it's referenced.
-- **Schema gaps:** The assignment's base schema for `competitor_rankings` has no way to distinguish ATP from WTA or one week from another — extra columns were added to make the required analysis possible.
+## 🚀 Live Demo
 
-See the docx documentation for the full troubleshooting log and reasoning behind every design decision.
+Explore the deployed application:
 
-## Data Source
+**https://tennis-explorer-zawxixnorsxujz6ttykgnm.streamlit.app/**
 
-All data comes from the live [Sportradar Tennis API](https://developer.sportradar.com/tennis/reference/overview) (trial access), covering real ATP, WTA, and ITF competitions, venues, and doubles rankings.
+## 📝 Conclusion
+
+Tennis Explorer demonstrates an end-to-end analytics workflow, from API extraction and data transformation to relational database management, SQL analysis, and interactive visualization.
+
+The project showcases practical skills in Python, SQL, MySQL, data processing, dashboard development, and deployment.
