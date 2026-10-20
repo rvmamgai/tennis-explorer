@@ -1,258 +1,377 @@
-import streamlit as st
 import pandas as pd
 import plotly.express as px
+import streamlit as st
+
 from database import engine
 
+# =====================================================================
+# PAGE SETUP
+# =====================================================================
 st.set_page_config(page_title="Tennis Rankings Explorer", page_icon="🎾", layout="wide")
 
-st.title("🎾 Tennis Rankings Explorer")
-st.caption("Explore ATP, WTA and ITF tennis competitions, venues, and doubles rankings — powered by the Sportradar API")
-
-GREEN_SCALE = "Greens"
-GENDER_COLORS = {"men": "#1f77b4", "women": "#e377c2", "mixed": "#2E7D32"}
+BAR_COLOR = "#2E7D32"  # one single color -> no extra color-scale bar
+GENDER_COLORS = {"Men": "#1f77b4", "Women": "#e377c2", "Mixed": "#2ca02c",
+                  "Not Specified": "#9e9e9e"}
 
 
-def paginated_table(base_query, params, key, page_size=20):
-    count_query = f"SELECT COUNT(*) AS n FROM ({base_query}) AS sub"
-    total_rows = pd.read_sql(count_query, engine, params=params)["n"][0]
-    total_pages = max(1, -(-total_rows // page_size))
-
-    col_a, col_b = st.columns([1, 4])
-    page = col_a.number_input("Page", min_value=1, max_value=total_pages, value=1, key=key)
-
-    offset = (page - 1) * page_size
-    paged_query = base_query + " LIMIT %(limit)s OFFSET %(offset)s"
-    paged_params = {**params, "limit": page_size, "offset": offset}
-
-    results = pd.read_sql(paged_query, engine, params=paged_params)
-    col_b.write(f"Found **{total_rows}** rows · page {page} of {total_pages}")
-    st.dataframe(results, use_container_width=True)
+@st.cache_data
+def run_query(sql, params=None):
+    return pd.read_sql(sql, engine, params=params)
 
 
-def horizontal_bar(df, x_col, y_col, title=None):
-    fig = px.bar(
-        df.sort_values(x_col), x=x_col, y=y_col,
-        orientation="h", color=x_col, color_continuous_scale=GREEN_SCALE,
-        text=x_col, title=title
+def chart_header(title, explanation):
+    """Clear title + one-line plain-English explanation above every chart."""
+    st.subheader(title)
+    st.caption(explanation)
+
+
+def clean_bar(fig, height=420):
+    fig.update_layout(
+        height=height,
+        coloraxis_showscale=False,
+        showlegend=False,
+        margin=dict(l=10, r=10, t=10, b=10),
     )
-    fig.update_layout(xaxis_title=x_col.replace("_", " ").title(), yaxis_title="",
-                       coloraxis_showscale=False, showlegend=False)
-    fig.update_xaxes(tickangle=0)
-    st.plotly_chart(fig, use_container_width=True)
+    return fig
 
 
-def vertical_bar(df, x_col, y_col, title=None):
-    fig = px.bar(
-        df, x=x_col, y=y_col,
-        color=y_col, color_continuous_scale=GREEN_SCALE, title=title
-    )
-    fig.update_layout(xaxis_title="", yaxis_title=y_col.replace("_", " ").title(),
-                       coloraxis_showscale=False)
-    fig.update_xaxes(tickangle=0)
-    st.plotly_chart(fig, use_container_width=True)
-
-
-def donut_chart(df, names_col, values_col, color_map=None, title=None):
-    fig = px.pie(
-        df, names=names_col, values=values_col, hole=0.5,
-        color=names_col, color_discrete_map=color_map, title=title
-    )
-    fig.update_traces(textinfo="percent+label")
-    st.plotly_chart(fig, use_container_width=True)
-
-
-# =========================================================
-# SIDEBAR: FILTERS
-# =========================================================
-st.sidebar.header("Filters")
-
-ranking_genders = pd.read_sql("SELECT DISTINCT gender FROM competitor_rankings", engine)["gender"].tolist()
-competition_genders = pd.read_sql("SELECT DISTINCT gender FROM competitions", engine)["gender"].tolist()
-all_genders = sorted(set(ranking_genders) | set(competition_genders))
-
-countries = pd.read_sql("SELECT DISTINCT country FROM competitors ORDER BY country", engine)
-
-selected_gender = st.sidebar.selectbox("Gender", ["All"] + all_genders)
-min_rank, max_rank = st.sidebar.slider("Rank Range", 1, 500, (1, 100))
-selected_country = st.sidebar.selectbox("Country", ["All"] + countries["country"].tolist())
-search_name = st.sidebar.text_input("Search Competitors")
-
-latest_period = pd.read_sql("""
+# =====================================================================
+# FIND THE LATEST RANKING PERIOD (rankings are published weekly)
+# =====================================================================
+latest_period = run_query("""
     SELECT year, week FROM competitor_rankings
     ORDER BY year DESC, week DESC LIMIT 1
-""", engine).iloc[0]
+""").iloc[0]
 latest_year, latest_week = int(latest_period["year"]), int(latest_period["week"])
 
+# =====================================================================
+# LOAD DATA  (rankings pinned to the latest week so each player appears once)
+# =====================================================================
+rankings_full = run_query("""
+    SELECT c.competitor_id, c.name, c.country, c.country_code, c.abbreviation,
+           r.`rank` AS `rank`, r.movement, r.points, r.ranking_name, r.gender
+    FROM competitors c
+    JOIN competitor_rankings r ON c.competitor_id = r.competitor_id
+    WHERE r.year = %(year)s AND r.week = %(week)s
+""", params={"year": latest_year, "week": latest_week})
+rankings_full["movement"] = pd.to_numeric(rankings_full["movement"], errors="coerce")
 
-# =========================================================
-# OVERVIEW METRICS (KPIs)
-# =========================================================
-with engine.connect() as conn:
-    total_competitors = pd.read_sql("SELECT COUNT(*) AS n FROM competitors", conn)["n"][0]
-    total_countries = pd.read_sql("SELECT COUNT(DISTINCT country) AS n FROM competitors", conn)["n"][0]
-    highest_points = pd.read_sql("SELECT MAX(points) AS n FROM competitor_rankings", conn)["n"][0]
+# LEFT JOIN so competitions without a matching category are not dropped
+competitions_full = run_query("""
+    SELECT c.competition_name, c.type, c.gender, cat.category_name
+    FROM competitions c
+    LEFT JOIN categories cat ON c.category_id = cat.category_id
+""")
+competitions_full["gender"] = (
+    competitions_full["gender"].astype(str).str.strip().str.title()
+)
+competitions_full.loc[
+    competitions_full["gender"].isin(["None", "Nan", ""]), "gender"
+] = "Not Specified"
+competitions_full["type"] = competitions_full["type"].fillna("Not Specified")
+competitions_full["category_name"] = competitions_full["category_name"].fillna("Not Specified")
 
-col1, col2, col3 = st.columns(3)
-col1.metric("👥 Total Competitors", total_competitors)
-col2.metric("🌍 Countries Represented", total_countries)
-col3.metric("🏆 Highest Points", highest_points)
-
-st.divider()
-
-# =========================================================
-# SHARED FILTER QUERY (used by charts below AND the table further down)
-# =========================================================
-rankings_query = """
-    SELECT c.name, c.country, r.`rank`, r.points, r.movement, r.ranking_name
-    FROM competitor_rankings r
-    JOIN competitors c ON r.competitor_id = c.competitor_id
-    WHERE r.year = %(year)s
-      AND r.week = %(week)s
-      AND r.`rank` BETWEEN %(min_rank)s AND %(max_rank)s
-"""
-rankings_params = {"year": latest_year, "week": latest_week,
-                    "min_rank": min_rank, "max_rank": max_rank}
-
-if selected_gender != "All":
-    rankings_query += " AND r.gender = %(gender)s"
-    rankings_params["gender"] = selected_gender
-if selected_country != "All":
-    rankings_query += " AND c.country = %(country)s"
-    rankings_params["country"] = selected_country
-if search_name:
-    rankings_query += " AND c.name LIKE %(name)s"
-    rankings_params["name"] = f"%{search_name}%"
-
-# ---- Two charts, side by side, right below the KPIs ----
-chart_col1, chart_col2 = st.columns(2)
-
-with chart_col1:
-    st.subheader("🏆 Top 10 by points")
-    top10_query = rankings_query.replace(
-        "SELECT c.name, c.country, r.`rank`, r.points, r.movement, r.ranking_name",
-        "SELECT c.name, r.points"
-    ) + " ORDER BY r.points DESC LIMIT 10"
-    top10 = pd.read_sql(top10_query, engine, params=rankings_params)
-    if top10.empty:
-        st.info("No competitors match the current filters.")
-    else:
-        horizontal_bar(top10, "points", "name")
-
-with chart_col2:
-    st.subheader("🥧 Competitions by gender")
-    gender_query = "SELECT gender, COUNT(*) AS competition_count FROM competitions"
-    gender_params = {}
-    if selected_gender != "All":
-        gender_query += " WHERE gender = %(gender)s"
-        gender_params["gender"] = selected_gender
-    gender_query += " GROUP BY gender"
-    gender_dist = pd.read_sql(gender_query, engine, params=gender_params)
-    if gender_dist.empty:
-        st.info("No competitions match the current gender filter.")
-    else:
-        donut_chart(gender_dist, "gender", "competition_count", color_map=GENDER_COLORS)
-
-st.divider()
-
-# =========================================================
-# RANKINGS TABLE
-# =========================================================
-st.header("Rankings")
-paginated_table(rankings_query + " ORDER BY r.`rank`", rankings_params, key="rank_page")
-
-with st.expander("🏅 Leaderboards"):
-    tab1, tab2 = st.tabs(["Top Ranked", "Highest Points"])
-    with tab1:
-        top_ranked = pd.read_sql(rankings_query + " ORDER BY r.`rank` LIMIT 10",
-                                  engine, params=rankings_params)
-        st.dataframe(top_ranked[["name", "country", "rank", "ranking_name"]], use_container_width=True)
-    with tab2:
-        top_points = pd.read_sql(rankings_query + " ORDER BY r.points DESC LIMIT 10",
-                                  engine, params=rankings_params)
-        st.dataframe(top_points[["name", "country", "points", "ranking_name"]], use_container_width=True)
-
-with st.expander("🌍 Country-wise analysis"):
-    country_stats = pd.read_sql("""
-        SELECT c.country, COUNT(*) AS competitor_count, ROUND(AVG(r.points), 1) AS avg_points
-        FROM competitor_rankings r
-        JOIN competitors c ON r.competitor_id = c.competitor_id
-        WHERE r.year = %(year)s AND r.week = %(week)s
-        GROUP BY c.country ORDER BY competitor_count DESC
-    """, engine, params={"year": latest_year, "week": latest_week})
-    st.dataframe(country_stats, use_container_width=True)
-    vertical_bar(country_stats.head(15), "country", "avg_points")
-
-st.divider()
-
-# =========================================================
-# VENUES AND COMPLEXES
-# =========================================================
-st.header("Venues and Complexes")
-
-venue_countries = pd.read_sql("SELECT DISTINCT country_name FROM venues ORDER BY country_name", engine)
-selected_venue_country = st.selectbox("Filter venues by country", ["All"] + venue_countries["country_name"].tolist())
-
-venue_query = """
-    SELECT v.venue_name, v.city_name, cx.complex_name, v.timezone
+venues_full = run_query("""
+    SELECT v.venue_name, v.city_name, v.country_name, cx.complex_name
     FROM venues v
-    JOIN complexes cx ON v.complex_id = cx.complex_id
-    WHERE 1=1
-"""
-venue_params = {}
-if selected_venue_country != "All":
-    venue_query += " AND v.country_name = %(country)s"
-    venue_params["country"] = selected_venue_country
+    LEFT JOIN complexes cx ON v.complex_id = cx.complex_id
+""")
+venues_full["country_name"] = venues_full["country_name"].fillna("Not Specified")
+venues_full["complex_name"] = venues_full["complex_name"].fillna("Not Specified")
 
-paginated_table(venue_query, venue_params, key="venue_page")
+# =====================================================================
+# SIDEBAR FILTERS
+# =====================================================================
+st.sidebar.title("🎛️ Filters")
 
-with st.expander("📊 Competitions by category"):
-    df = pd.read_sql("""
-        SELECT cat.category_name, COUNT(*) AS competition_count
-        FROM competitions c JOIN categories cat ON c.category_id = cat.category_id
-        GROUP BY cat.category_name ORDER BY competition_count DESC
-    """, engine)
-    vertical_bar(df, "category_name", "competition_count")
+st.sidebar.markdown("### 👤 Players")
+max_rank = int(rankings_full["rank"].max())
+rank_range = st.sidebar.slider("World ranking range", 1, max_rank, (1, min(100, max_rank)))
+country_filter = st.sidebar.multiselect(
+    "Player country (leave empty = all)",
+    sorted(rankings_full["country"].dropna().unique().tolist()),
+)
+name_filter = st.sidebar.text_input("Search player name")
+top_n = st.sidebar.slider("How many players in the 'Top players' chart", 5, 30, 10)
 
-with st.expander("🔍 Search & filter competitions"):
-    categories = pd.read_sql("SELECT category_name FROM categories ORDER BY category_name", engine)
-    types = pd.read_sql("SELECT DISTINCT type FROM competitions ORDER BY type", engine)
+st.sidebar.markdown("### 🏆 Competitions")
+gender_filter = st.sidebar.multiselect(
+    "Competition gender (leave empty = all)",
+    sorted(competitions_full["gender"].unique().tolist()),
+)
+type_filter = st.sidebar.multiselect(
+    "Competition type (leave empty = all)",
+    sorted(competitions_full["type"].unique().tolist()),
+)
+category_filter = st.sidebar.multiselect(
+    "Competition category (leave empty = all)",
+    sorted(competitions_full["category_name"].unique().tolist()),
+)
+comp_search = st.sidebar.text_input("Search competition name")
 
-    c1, c2, c3 = st.columns(3)
-    sel_category = c1.selectbox("Category", ["All"] + categories["category_name"].tolist())
-    sel_type = c2.selectbox("Type", ["All"] + types["type"].tolist())
-    comp_search = c3.text_input("Search competition by name")
+st.sidebar.markdown("### 🏟️ Venues")
+venue_country_filter = st.sidebar.multiselect(
+    "Venue country (leave empty = all)",
+    sorted(venues_full["country_name"].unique().tolist()),
+)
+venue_search = st.sidebar.text_input("Search venue / city")
 
-    comp_query = """
-        SELECT c.competition_name, c.type, c.gender, cat.category_name
-        FROM competitions c JOIN categories cat ON c.category_id = cat.category_id
-        WHERE 1=1
-    """
-    comp_params = {}
-    if sel_category != "All":
-        comp_query += " AND cat.category_name = %(category)s"
-        comp_params["category"] = sel_category
-    if sel_type != "All":
-        comp_query += " AND c.type = %(type)s"
-        comp_params["type"] = sel_type
-    if comp_search:
-        comp_query += " AND c.competition_name LIKE %(name)s"
-        comp_params["name"] = f"%{comp_search}%"
+# =====================================================================
+# APPLY FILTERS
+# =====================================================================
+df = rankings_full[
+    (rankings_full["rank"] >= rank_range[0]) & (rankings_full["rank"] <= rank_range[1])
+]
+if country_filter:
+    df = df[df["country"].isin(country_filter)]
+if name_filter:
+    df = df[df["name"].str.contains(name_filter, case=False, na=False)]
+df = df.sort_values("rank")
 
-    paginated_table(comp_query, comp_params, key="comp_page")
+comp_df = competitions_full.copy()
+if gender_filter:
+    comp_df = comp_df[comp_df["gender"].isin(gender_filter)]
+if type_filter:
+    comp_df = comp_df[comp_df["type"].isin(type_filter)]
+if category_filter:
+    comp_df = comp_df[comp_df["category_name"].isin(category_filter)]
+if comp_search:
+    comp_df = comp_df[
+        comp_df["competition_name"].str.contains(comp_search, case=False, na=False)
+    ]
 
-with st.expander("🌳 Parent and sub-competitions"):
-    parents = pd.read_sql("""
-        SELECT DISTINCT parent.competition_name
-        FROM competitions child JOIN competitions parent ON child.parent_id = parent.competition_id
-        ORDER BY parent.competition_name
-    """, engine)
-    selected_parent = st.selectbox("Choose a parent competition", parents["competition_name"])
-    subs = pd.read_sql("""
-        SELECT child.competition_name, child.type, child.gender
-        FROM competitions child JOIN competitions parent ON child.parent_id = parent.competition_id
-        WHERE parent.competition_name = %(parent_name)s
-    """, engine, params={"parent_name": selected_parent})
-    st.dataframe(subs, use_container_width=True)
+venue_df = venues_full.copy()
+if venue_country_filter:
+    venue_df = venue_df[venue_df["country_name"].isin(venue_country_filter)]
+if venue_search:
+    mask = venue_df["venue_name"].str.contains(venue_search, case=False, na=False) | \
+           venue_df["city_name"].str.contains(venue_search, case=False, na=False)
+    venue_df = venue_df[mask]
 
-st.divider()
-st.caption("Built with Python, MySQL, and Streamlit · Data from the Sportradar Tennis API")
+# =====================================================================
+# HEADER + KPIs
+# =====================================================================
+st.title("🎾 Tennis Rankings Explorer")
+st.caption("Game Analytics: Unlocking Tennis Data with SportRadar API")
+
+st.info(
+    f"Showing players ranked **#{rank_range[0]} to #{rank_range[1]}**"
+    + (f" from **{', '.join(country_filter)}**" if country_filter else " from **all countries**")
+    + f" — ranking period: **{latest_year} / Week {latest_week}**."
+    + " Change the filters in the left sidebar - every number and chart below updates."
+)
+
+k1, k2, k3, k4, k5 = st.columns(5)
+k1.metric("Players Shown", f"{df['competitor_id'].nunique():,}",
+          help="Number of ranked players that match your ranking range, country and name filters.")
+k2.metric("Countries Represented", f"{df['country'].nunique():,}",
+          help="How many different countries those players come from.")
+k3.metric("Highest Ranking Points", f"{int(df['points'].max()):,}" if not df.empty else "0",
+          help="Points of the best player in the current selection.")
+k4.metric("Competitions Found", f"{comp_df.shape[0]:,}",
+          help=f"Out of {competitions_full.shape[0]:,} total competitions, after your competition filters.")
+k5.metric("Venues Found", f"{venue_df.shape[0]:,}",
+          help=f"Out of {venues_full.shape[0]:,} total venues, after your venue filters.")
+
+st.markdown("---")
+
+# =====================================================================
+# TABS
+# =====================================================================
+tab_over, tab_players, tab_comp, tab_venue = st.tabs(
+    ["📊 Overview", "👤 Players", "🏆 Competitions", "🏟️ Venues"]
+)
+
+# ---------------------------------------------------------------- OVERVIEW
+with tab_over:
+    c1, c2 = st.columns(2)
+
+    with c1:
+        chart_header(
+            f"Top {top_n} Players by Ranking Points",
+            "Each bar is one player. Longer bar = more ranking points.",
+        )
+        if df.empty:
+            st.info("No players match the current filters.")
+        else:
+            top_df = df.sort_values("points", ascending=False).head(top_n)
+            fig = px.bar(
+                top_df, x="points", y="name", orientation="h", text="points",
+                color_discrete_sequence=[BAR_COLOR],
+                labels={"points": "Ranking Points", "name": "Player"},
+                hover_data={"rank": True, "country": True, "points": True, "name": False},
+            )
+            fig.update_layout(yaxis={"categoryorder": "total ascending"})
+            st.plotly_chart(clean_bar(fig), use_container_width=True)
+
+    with c2:
+        chart_header(
+            "Competitions: Men vs Women vs Mixed",
+            "Share of competitions for each gender category (after your competition filters).",
+        )
+        if comp_df.empty:
+            st.info("No competitions match the current filters.")
+        else:
+            g = comp_df["gender"].value_counts().reset_index()
+            g.columns = ["Gender", "Number of Competitions"]
+            fig = px.pie(g, names="Gender", values="Number of Competitions", hole=0.4,
+                         color="Gender", color_discrete_map=GENDER_COLORS)
+            fig.update_traces(textinfo="label+percent+value")
+            fig.update_layout(height=420, margin=dict(l=10, r=10, t=10, b=10))
+            st.plotly_chart(fig, use_container_width=True)
+
+    c3, c4 = st.columns(2)
+    with c3:
+        chart_header(
+            "Number of Players per Country",
+            "Which countries have the most players in the current ranking selection.",
+        )
+        if df.empty:
+            st.info("No players match the current filters.")
+        else:
+            pc = df["country"].value_counts().head(15).reset_index()
+            pc.columns = ["Country", "Number of Players"]
+            fig = px.bar(pc, x="Number of Players", y="Country", orientation="h",
+                         text="Number of Players", color_discrete_sequence=[BAR_COLOR])
+            fig.update_layout(yaxis={"categoryorder": "total ascending"})
+            st.plotly_chart(clean_bar(fig), use_container_width=True)
+
+    with c4:
+        chart_header(
+            "Rank vs Points (every player is a dot)",
+            "Top-ranked players (left) have the most points. Hover over a dot to see the player.",
+        )
+        if df.empty:
+            st.info("No players match the current filters.")
+        else:
+            fig = px.scatter(
+                df, x="rank", y="points", hover_name="name",
+                hover_data={"country": True},
+                color_discrete_sequence=[BAR_COLOR],
+                labels={"rank": "World Rank (1 = best)", "points": "Ranking Points"},
+            )
+            fig.update_layout(height=420, margin=dict(l=10, r=10, t=10, b=10))
+            st.plotly_chart(fig, use_container_width=True)
+
+# ---------------------------------------------------------------- PLAYERS
+with tab_players:
+    chart_header(
+        "Rank Movement (how many places players moved up or down)",
+        "Positive = climbed up the rankings, negative = dropped, 0 = no change.",
+    )
+    mv = df["movement"].dropna()
+    if mv.empty:
+        st.info("No movement data for the current selection.")
+    else:
+        fig = px.histogram(mv, x="movement", nbins=30, color_discrete_sequence=[BAR_COLOR],
+                           labels={"movement": "Places Moved", "count": "Number of Players"})
+        fig.update_layout(height=350, showlegend=False, yaxis_title="Number of Players",
+                          margin=dict(l=10, r=10, t=10, b=10))
+        st.plotly_chart(fig, use_container_width=True)
+
+    st.subheader("🔎 Player Profile")
+    if df.empty:
+        st.info("No players match the current filters.")
+    else:
+        player = st.selectbox("Pick a player", df["name"].tolist())
+        row = df[df["name"] == player].iloc[0]
+        p1, p2, p3, p4 = st.columns(4)
+        p1.metric("World Rank", int(row["rank"]))
+        p2.metric("Ranking Points", f"{int(row['points']):,}")
+        p3.metric("Places Moved", int(row["movement"]) if pd.notna(row["movement"]) else "-")
+        p4.metric("Ranking Type", row["ranking_name"] if pd.notna(row["ranking_name"]) else "-")
+        st.caption(f"Country: {row['country']}")
+
+    st.subheader("Filtered Rankings Table")
+    table = df[["rank", "name", "country", "movement", "points", "ranking_name"]].rename(
+        columns={"rank": "Rank", "name": "Player", "country": "Country",
+                 "movement": "Places Moved", "points": "Points",
+                 "ranking_name": "Ranking Type"})
+    st.dataframe(table, use_container_width=True, hide_index=True)
+    st.download_button("⬇️ Download rankings (CSV)", table.to_csv(index=False),
+                       "tennis_rankings.csv", "text/csv")
+
+# ---------------------------------------------------------------- COMPETITIONS
+with tab_comp:
+    cc1, cc2 = st.columns(2)
+    with cc1:
+        chart_header(
+            "Competitions by Type",
+            "How many competitions are singles, doubles, mixed, etc.",
+        )
+        if comp_df.empty:
+            st.info("No competitions match the current filters.")
+        else:
+            t = comp_df["type"].value_counts().reset_index()
+            t.columns = ["Type", "Number of Competitions"]
+            fig = px.bar(t, x="Type", y="Number of Competitions", text="Number of Competitions",
+                         color_discrete_sequence=[BAR_COLOR])
+            st.plotly_chart(clean_bar(fig, 380), use_container_width=True)
+
+    with cc2:
+        chart_header(
+            "Top 15 Competition Categories",
+            "Categories (e.g. ATP, WTA, ITF) that have the most competitions.",
+        )
+        if comp_df.empty:
+            st.info("No competitions match the current filters.")
+        else:
+            cat = comp_df["category_name"].value_counts().head(15).reset_index()
+            cat.columns = ["Category", "Number of Competitions"]
+            fig = px.bar(cat, x="Number of Competitions", y="Category", orientation="h",
+                         text="Number of Competitions", color_discrete_sequence=[BAR_COLOR])
+            fig.update_layout(yaxis={"categoryorder": "total ascending"})
+            st.plotly_chart(clean_bar(fig, 380), use_container_width=True)
+
+    st.subheader("Competitions Table")
+    ctable = comp_df.rename(columns={
+        "competition_name": "Competition", "type": "Type",
+        "gender": "Gender", "category_name": "Category"})
+    st.dataframe(ctable, use_container_width=True, hide_index=True)
+    st.download_button("⬇️ Download competitions (CSV)", ctable.to_csv(index=False),
+                       "tennis_competitions.csv", "text/csv")
+
+# ---------------------------------------------------------------- VENUES
+with tab_venue:
+    vc1, vc2 = st.columns(2)
+    with vc1:
+        chart_header(
+            "Top 15 Countries by Number of Venues",
+            "Countries that host the most tennis venues.",
+        )
+        if venue_df.empty:
+            st.info("No venues match the current filters.")
+        else:
+            vcnt = venue_df["country_name"].value_counts().head(15).reset_index()
+            vcnt.columns = ["Country", "Number of Venues"]
+            fig = px.bar(vcnt, x="Number of Venues", y="Country", orientation="h",
+                         text="Number of Venues", color_discrete_sequence=[BAR_COLOR])
+            fig.update_layout(yaxis={"categoryorder": "total ascending"})
+            st.plotly_chart(clean_bar(fig, 400), use_container_width=True)
+
+    with vc2:
+        chart_header(
+            "Top 15 Complexes by Number of Venues",
+            "A complex is a facility containing several courts/venues.",
+        )
+        if venue_df.empty:
+            st.info("No venues match the current filters.")
+        else:
+            cx = venue_df[venue_df["complex_name"] != "Not Specified"]["complex_name"] \
+                .value_counts().head(15).reset_index()
+            cx.columns = ["Complex", "Number of Venues"]
+            if cx.empty:
+                st.info("No complex information available.")
+            else:
+                fig = px.bar(cx, x="Number of Venues", y="Complex", orientation="h",
+                             text="Number of Venues", color_discrete_sequence=[BAR_COLOR])
+                fig.update_layout(yaxis={"categoryorder": "total ascending"})
+                st.plotly_chart(clean_bar(fig, 400), use_container_width=True)
+
+    st.subheader("Venues and Complexes Table")
+    vtable = venue_df.rename(columns={
+        "venue_name": "Venue", "city_name": "City",
+        "country_name": "Country", "complex_name": "Complex"})
+    st.dataframe(vtable, use_container_width=True, hide_index=True)
+    st.download_button("⬇️ Download venues (CSV)", vtable.to_csv(index=False),
+                       "tennis_venues.csv", "text/csv")
